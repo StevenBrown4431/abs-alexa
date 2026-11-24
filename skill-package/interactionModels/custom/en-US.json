@@ -104,7 +104,11 @@
           "samples": [
             "play last book",
             "play last playing book",
-            "play last playing audiobook"
+            "play last playing audiobook",
+            "play last podcast",
+            "play last playing podcast",
+            "resume my podcast",
+            "resume my book"
           ]
         },
         {
@@ -147,7 +151,7 @@
             "skip back {time}",
             "rewind {time}",
             "reverse {time}",
-            "go back {time} "
+            "go back {time}"
           ]
         },
         {
@@ -156,7 +160,7 @@
               "name": "time",
               "type": "AMAZON.DURATION",
               "samples": [
-                "Skip forward {time} "
+                "Skip forward {time}"
               ]
             }
           ],
@@ -182,7 +186,13 @@
           ],
           "name": "PlayBookIntent",
           "samples": [
-            "play {title} by {author}"
+            "play {title} by {author}",
+            "play {title}",
+            "play the podcast {title}",
+            "play podcast {title}",
+            "play the latest episode of {title}",
+            "play latest episode of {title}",
+            "listen to {title}"
           ]
         },
         {
