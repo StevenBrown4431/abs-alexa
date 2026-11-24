@@ -1,6 +1,4 @@
 'use strict';
-// Every HTTP call to Audiobookshelf. Stateless: these take what they need as
-// arguments and return parsed responses.
 
 const request = require('sync-request');
 const { SERVER_URL, baseheaders } = require('./settings');
@@ -28,7 +26,7 @@ function getLastPlayedLibraryItem() {
 }
 
 function getItemById(id, options = {}) {
-  const baseUrl = SERVER_URL + '/api/items/'; // Replace with your actual base URL
+  const baseUrl = SERVER_URL + '/api/items/';
   let url = `${baseUrl}${id}`;
 
   const queryParams = [];
@@ -60,10 +58,10 @@ function getItemById(id, options = {}) {
   return JSON.parse(response.body.toString());
 }
 
-function startUserPlaySession(libraryID, handlerInput) {
+function startUserPlaySession(libraryID, handlerInput, episodeId = null) {
   let res;
   try {
-    console.log("startUserPlaySession")
+    console.log(`startUserPlaySession (item=${libraryID}, episode=${episodeId || 'none'})`);
     let deviceInfo = {
       deviceId: handlerInput.requestEnvelope.context.System.device.deviceId,
       clientName: "Alexa Device",
@@ -71,7 +69,7 @@ function startUserPlaySession(libraryID, handlerInput) {
       manufacturer: "Amazon",
       model: "Echo",
       sdkVersion: 1
-    }
+    };
     let bodyParameters = {
       deviceInfo: deviceInfo,
       forceDirectPlay: false,
@@ -84,27 +82,24 @@ function startUserPlaySession(libraryID, handlerInput) {
         "audio/x-aiff"
       ],
       mediaPlayer: "unknown"
-    }
+    };
 
+    const endpoint = episodeId
+      ? `${SERVER_URL}/api/items/${libraryID}/play/${episodeId}`
+      : `${SERVER_URL}/api/items/${libraryID}/play`;
 
-
-    res = request('POST', SERVER_URL + `/api/items/${libraryID}/play`, { headers: baseheaders, json: bodyParameters });
+    res = request('POST', endpoint, { headers: baseheaders, json: bodyParameters });
     if (res.statusCode !== 200) {
       throw new Error(`Failed to start play session: HTTP ${res.statusCode}`);
     }
 
-    let data = JSON.parse(res.getBody('utf8'));
-
-    return data;
+    return JSON.parse(res.getBody('utf8'));
   } catch (error) {
     console.error('Error retrieving play session:', error.message);
     throw error;
   }
 }
 
-// ABS answers 404 for a play session it no longer holds, which callers treat
-// differently from a transient failure: the session cannot come back, so
-// retrying it is pointless.
 function httpError(message, statusCode) {
   const error = new Error(`${message}: HTTP ${statusCode}`);
   error.statusCode = statusCode;
@@ -113,30 +108,24 @@ function httpError(message, statusCode) {
 
 function getExistingUserPlaySession(sessionID) {
   try {
-    console.log("getExistingUserPlaySession")
+    console.log("getExistingUserPlaySession");
     const res = request('GET', SERVER_URL + `/api/session/${encodeURIComponent(sessionID)}`, { headers: baseheaders });
     if (res.statusCode !== 200) {
       throw new Error(`Failed to fetch play session: HTTP ${res.statusCode}`);
     }
-    let data = JSON.parse(res.getBody('utf8'));
-
-    return data;
+    return JSON.parse(res.getBody('utf8'));
   } catch (error) {
     console.error('Error retrieving play session:', error.message);
     throw error;
   }
 }
 
-// Idempotent: it records where the user is in a book without opening or
-// touching a play session, so it adds nothing to ABS listening history. That
-// makes it the safe way to save a position when the play session is gone.
 function updateMediaProgress(libraryItemId, episodeId, data) {
   if (!libraryItemId) throw new Error('Cannot update media progress without a library item id');
   const url = episodeId
     ? `${SERVER_URL}/api/me/progress/${libraryItemId}/${episodeId}`
     : `${SERVER_URL}/api/me/progress/${libraryItemId}`;
 
-  // baseheaders carries the bearer token; without it ABS answers 401.
   const res = request('PATCH', url, { headers: baseheaders, json: data });
   console.log("updateMediaProgress - Response code: " + res.statusCode);
   if (res.statusCode !== 200) throw new Error(`Failed to update media progress: HTTP ${res.statusCode}`);
@@ -152,15 +141,11 @@ function updateUserPlaySession(playSession, currentBookTime, timeListened) {
     timeListened: Math.max(0, Number(timeListened) || 0),
     duration: playSession.duration,
   };
-  console.log("Update ABS play session for book: " + playSession.mediaMetadata.title
-    + ` (currentTime=${payload.currentTime}, timeListened=${payload.timeListened})`);
   const res = request('POST', SERVER_URL + `/api/session/${playSession.id}/sync`, {
     headers: { 'Content-Type': 'application/json', ...baseheaders },
     json: payload,
   });
-  console.log("updateUserPlaySession - Response code: " + res.statusCode);
   if (res.statusCode !== 200) throw httpError(`Failed to sync play session`, res.statusCode);
-  console.log("updateUserPlaySession - Successfully synced play session with ABS");
   return true;
 }
 
@@ -174,28 +159,22 @@ function closeUserPlaySession(userPlaySession, currentBookTime, timeListened) {
     duration: userPlaySession.duration,
   };
   const apiUrl = SERVER_URL + `/api/session/${userPlaySession.id}/close`;
-  console.log("Close ABS play session for book: " + userPlaySession.mediaMetadata.title
-    + ` (currentTime=${payload.currentTime}, timeListened=${payload.timeListened})`);
   const res = request('POST', apiUrl, {
     headers: { 'Content-Type': 'application/json', ...baseheaders },
     json: payload,
   });
-  console.log("closeUserPlaySession - Response code: " + res.statusCode);
   if (res.statusCode !== 200) throw httpError(`Failed to close play session`, res.statusCode);
-  console.log("closeUserPlaySession - Successfully synced and closed play session with ABS");
   return true;
 }
 
 function getCoverUrl(libraryItemId) {
-  // as of 11/28/24, retrieving cover does not require authentication
-  return SERVER_URL + `/api/items/${libraryItemId}/cover`
+  return SERVER_URL + `/api/items/${libraryItemId}/cover`;
 }
 
 function getLibraryFilterData(libraryID) {
   try {
     let res = request('GET', `${SERVER_URL}/api/libraries/${libraryID}/filterdata`, { headers: baseheaders });
-    let data = JSON.parse(res.getBody('utf8'));
-    return data;
+    return JSON.parse(res.getBody('utf8'));
   } catch (error) {
     console.error('Error during getLibraryFilterData:', error);
     throw error;
@@ -214,86 +193,52 @@ function getAllLibraries() {
 }
 
 function getAllAudiobooks() {
-  const allLibraries = getAllLibraries()
-  const bookLibraries = allLibraries.filter(library => library.mediaType === 'book');
-  const audiobooksOnlyLibraries = bookLibraries.filter(library => library.settings.audiobooksOnly);
-  const bookLibraryIDs = audiobooksOnlyLibraries.map(library => library.id);
+  const allLibraries = getAllLibraries();
+  const supportedLibraries = allLibraries.filter(
+    library => (library.mediaType === 'book' && library.settings?.audiobooksOnly) || library.mediaType === 'podcast'
+  );
+  const libraryIDs = supportedLibraries.map(library => library.id);
   const allLibraryItems = [];
 
-
-  // Loop through each library and get the items
-  for (let i = 0; i < bookLibraryIDs.length; i++) {
-    const libraryID = bookLibraryIDs[i];
-    const options =
-    {
-      libraryID: libraryID,
+  for (let i = 0; i < libraryIDs.length; i++) {
+    const options = {
+      libraryID: libraryIDs[i],
       sort: 'media.metadata.title',
       minified: 1
-      // limit = 500
-    }
+    };
     const items = getLibraryItems(options);
-    Array.prototype.push.apply(allLibraryItems, items.results);
+    if (items?.results) {
+      Array.prototype.push.apply(allLibraryItems, items.results);
+    }
   }
 
   return allLibraryItems;
 }
 
 function getLibraryItems(options = {}) {
-
   const {
-    libraryID,
-    limit = 0,
-    page = 0,
-    sort = '',
-    desc = 0,
-    filter = '',
-    minified = 0,
-    collapseseries = 0,
-    include = ''
+    libraryID, limit = 0, page = 0, sort = '', desc = 0,
+    filter = '', minified = 0, collapseseries = 0, include = ''
   } = options;
 
   const baseUrl = `${SERVER_URL}/api/libraries/${libraryID}/items`;
-
   const queryParams = [];
+  if (limit !== undefined && limit !== null) queryParams.push(`limit=${limit}`);
+  if (page !== undefined && page !== null) queryParams.push(`page=${page}`);
+  if (sort) queryParams.push(`sort=${sort}`);
+  if (desc !== undefined && desc !== null) queryParams.push(`desc=${desc}`);
+  if (filter) queryParams.push(`filter=${filter}`);
+  if (minified !== undefined && minified !== null) queryParams.push(`minified=${minified}`);
+  if (collapseseries !== undefined && collapseseries !== null) queryParams.push(`collapseseries=${collapseseries}`);
+  if (include) queryParams.push(`include=${include}`);
 
-  if (limit !== undefined && limit !== null) {
-    queryParams.push(`limit=${limit}`);
-  }
-  if (page !== undefined && page !== null) {
-    queryParams.push(`page=${page}`);
-  }
-  if (sort) {
-    queryParams.push(`sort=${sort}`);
-  }
-  if (desc !== undefined && desc !== null) {
-    queryParams.push(`desc=${desc}`);
-  }
-  if (filter) {
-    queryParams.push(`filter=${filter}`);
-  }
-  if (minified !== undefined && minified !== null) {
-    queryParams.push(`minified=${minified}`);
-  }
-  if (collapseseries !== undefined && collapseseries !== null) {
-    queryParams.push(`collapseseries=${collapseseries}`);
-  }
-  if (include) {
-    queryParams.push(`include=${include}`);
-  }
-
-  // Construct the final URL with query parameters
   const url = `${baseUrl}?${queryParams.join('&')}`;
-
   try {
-
     const response = request('GET', url, { headers: baseheaders });
-
     if (response.statusCode === 200) {
       return JSON.parse(response.getBody('utf8'));
-    } else {
-      console.error(`Error: Received status code ${response.statusCode}`);
-      return null;
     }
+    return null;
   } catch (error) {
     console.error(`Error: ${error.message}`);
     return null;
@@ -303,8 +248,7 @@ function getLibraryItems(options = {}) {
 function getAuthor(authorID) {
   try {
     let res = request('GET', `${SERVER_URL}/api/authors/${authorID}?include=items`, { headers: baseheaders });
-    let data = JSON.parse(res.getBody('utf8'));
-    return data;
+    return JSON.parse(res.getBody('utf8'));
   } catch (error) {
     console.error('Error during getAuthor:', error);
     throw error;
@@ -319,15 +263,16 @@ function searchFor(query, libraryID) {
   try {
     const url = buildLibrarySearchUrl(query, libraryID);
     let res = request('GET', url, { headers: baseheaders });
-    let data = JSON.parse(res.getBody('utf8'));
-    return data;
+    return JSON.parse(res.getBody('utf8'));
   } catch (error) {
     console.error('Error during searchFor:', error);
     throw error;
   }
 }
 
-module.exports = { getRecentLibraryItems, getLastPlayedLibraryItem, getItemById, startUserPlaySession,
+module.exports = {
+  getRecentLibraryItems, getLastPlayedLibraryItem, getItemById, startUserPlaySession,
   getExistingUserPlaySession, updateMediaProgress, updateUserPlaySession,
   closeUserPlaySession, getCoverUrl, getLibraryFilterData, getAllLibraries,
-  getAllAudiobooks, getLibraryItems, getAuthor, buildLibrarySearchUrl, searchFor };
+  getAllAudiobooks, getLibraryItems, getAuthor, buildLibrarySearchUrl, searchFor
+};
