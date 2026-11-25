@@ -132,7 +132,7 @@ function recoverPlaybackState(handlerInput, { allowSessionReplacement = true } =
   attributes.currentTrack = currentTrack;
   attributes.streamToken = player.rawToken && player.token
     ? player.rawToken
-    : attributes.streamToken || createPlaybackInstanceToken(userPlaySession, trackIndex);
+    : attributes.streamToken || createPlaybackToken(userPlaySession, trackIndex);
   attributes.playUrl = SERVER_URL + currentTrack.contentUrl + "?token=" + ABS_API_KEY;
   if (typeof attributes.nextStreamEnqueued !== 'boolean') attributes.nextStreamEnqueued = false;
   if (player.offsetInMilliseconds !== null) {
