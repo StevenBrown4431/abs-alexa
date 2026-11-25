@@ -449,6 +449,18 @@ const RecentBooksIntentHandler = {
   }
 };
 
+function resolveTargetEpisodeId(expandedItem) {
+  if (expandedItem?.mediaType !== 'podcast') return null;
+  const episodes = Array.isArray(expandedItem?.media?.episodes) ? expandedItem.media.episodes : [];
+  if (!episodes.length) return null;
+
+  // Prefer the episode currently in progress, otherwise pick the newest episode
+  const progressEpisodeId = expandedItem.userMediaProgress?.episodeId;
+  if (progressEpisodeId) return progressEpisodeId;
+
+  const sorted = [...episodes].sort((a, b) => (b.publishedAt || 0) - (a.publishedAt || 0));
+  return sorted[0].id;
+}
 /**
  * Intent handler to start playing an audio file.
  * By default, it will play a specific audio stream.
@@ -464,91 +476,81 @@ const PlayAudioIntentHandler = {
 
     try {
       let timeStart = timestamps.PlayAudioIntentHandlerStartTime = new Date();
-      let userPlaySession
-      let lastPlayedLibraryItem
-      let expandedItem
-      let lastPlayedID
-
-      let mediaProgress
-      let currentTime
+      let userPlaySession;
+      let lastPlayedLibraryItem;
+      let expandedItem;
+      let lastPlayedID;
+      let episodeId = null;
 
       const playBehavior = 'REPLACE_ALL';
 
-      let sessionAttributes = getAlexaSessionAttributes(handlerInput); // cannot set sessionAttriubtes and localAttributes equal
+      let sessionAttributes = getAlexaSessionAttributes(handlerInput);
       const recoveredState = recoverPlaybackState(handlerInput);
       if (recoveredState) sessionAttributes = recoveredState.attributes;
-      // *** if user is just pausing and resuming, don't need to
-      // start a new session everytime.
-      // so check for existing and use that.
 
-      const existingSession = recoveredState?.userPlaySession || sessionAttributes.userPlaySession
+      const existingSession = recoveredState?.userPlaySession || sessionAttributes.userPlaySession;
       let existingAttributes = (sessionAttributes && Object.keys(sessionAttributes).length > 0)
         ? sessionAttributes
         : recoveredState?.attributes || null;
-      if (existingSession && existingAttributes) // if session in progress, just resume that
-      {
-        //userPlaySession = getExistingUserPlaySession(sessionAttributes.userPlaySession.id)
-        userPlaySession = sessionAttributes.userPlaySession || localSessionAttributes.userPlaySession
 
-      }
-      // if no session already in progress, find last played audiobook
-      else {
-        lastPlayedLibraryItem = getLastPlayedLibraryItem()
-        lastPlayedID = lastPlayedLibraryItem.id
-
+      if (existingSession && existingAttributes) {
+        userPlaySession = sessionAttributes.userPlaySession || localSessionAttributes.userPlaySession;
+      } else {
+        lastPlayedLibraryItem = getLastPlayedLibraryItem();
+        lastPlayedID = lastPlayedLibraryItem.id;
         expandedItem = getItemById(lastPlayedID, { include: ['progress'], expanded: 1 });
-
+        episodeId = resolveTargetEpisodeId(expandedItem);
       }
 
-      if (!userPlaySession) { // open new playsession if needed
-        userPlaySession = startUserPlaySession(lastPlayedID, handlerInput)
+      if (!userPlaySession) {
+        userPlaySession = startUserPlaySession(lastPlayedID, handlerInput, episodeId);
       }
-      delete userPlaySession.libraryItem // this property is very large and not useful
-      // playSession = userPlaySession
+      delete userPlaySession.libraryItem;
+
+      let currentTime;
       if (!existingSession) {
-        mediaProgress = expandedItem.userMediaProgress
-        currentTime = mediaProgress.currentTime
-        if (currentTime > userPlaySession.duration) { // validation
-          currentTime = 0.0 // start at beginning
-          //updateMediaProgress(lastPlayedID, mediaProgress.episodeId, { currentTime: 0.0, duration: userPlaySession.duration })
-          syncPlaybackProgress(userPlaySession, 0.0, { timeListened: 0 })
+        const episodeProgress = episodeId && Array.isArray(expandedItem.userMediaProgress)
+          ? expandedItem.userMediaProgress.find(p => p.episodeId === episodeId)
+          : expandedItem.userMediaProgress;
+        currentTime = episodeProgress?.currentTime ?? 0.0;
+        if (currentTime > userPlaySession.duration) {
+          currentTime = 0.0;
+          syncPlaybackProgress(userPlaySession, 0.0, { timeListened: 0 });
         }
+      } else {
+        currentTime = existingSession.currentTime;
       }
-      else {
-        currentTime = existingSession.currentTime
 
-      }
-      sessionAttributes.userPlaySession = userPlaySession
+      sessionAttributes.userPlaySession = userPlaySession;
+      sessionAttributes.userPlaySessionID = userPlaySession.id;
 
-      sessionAttributes.userPlaySessionID = userPlaySession.id // can call API to pull the whole playSession again if needed
-
-      let currentTrack = sessionAttributes.currentTrack = getCurrentTrackByBookTime(currentTime, userPlaySession)
-      let currentTrackIndex = sessionAttributes.amazonToken = getCurrentTrackIndexByBookTime(currentTime, userPlaySession) // should start at 1
-      sessionAttributes.streamToken = createPlaybackInstanceToken(userPlaySession, currentTrackIndex)
-
+      let currentTrack = sessionAttributes.currentTrack = getCurrentTrackByBookTime(currentTime, userPlaySession);
+      let currentTrackIndex = sessionAttributes.amazonToken = getCurrentTrackIndexByBookTime(currentTime, userPlaySession);
+      sessionAttributes.streamToken = createPlaybackInstanceToken(userPlaySession, currentTrackIndex);
       sessionAttributes.currentTrackIndex = currentTrackIndex;
-      let trackStartOffset = currentTrack.startOffset
-      const offsetInMilliseconds = sessionAttributes.offsetInMilliseconds = (currentTime - trackStartOffset) * 1000
 
-      sessionAttributes.nextStreamEnqueued = false
-      const coverUrl = sessionAttributes.coverUrl = getCoverUrl(userPlaySession.libraryItemId)
+      let trackStartOffset = currentTrack.startOffset;
+      const offsetInMilliseconds = sessionAttributes.offsetInMilliseconds = (currentTime - trackStartOffset) * 1000;
 
-      const chapterTitle = getCurrentChapterByBookTime(currentTime, userPlaySession).title
-      const author = userPlaySession.displayAuthor
-      const bookTitle = userPlaySession.displayTitle
-      const playUrl = sessionAttributes.playUrl = SERVER_URL + userPlaySession.audioTracks[currentTrackIndex - 1].contentUrl + "?token=" + ABS_API_KEY
-      // const playUrl = SERVER_URL + userPlaySession.audioTracks[0].contentUrl + "?token=" + ABS_API_KEY
+      sessionAttributes.nextStreamEnqueued = false;
+      const coverUrl = sessionAttributes.coverUrl = getCoverUrl(userPlaySession.libraryItemId);
+
+      const chapterObj = getCurrentChapterByBookTime(currentTime, userPlaySession);
+      const chapterTitle = chapterObj?.title || userPlaySession.displayTitle;
+      const author = userPlaySession.displayAuthor;
+      const bookTitle = userPlaySession.displayTitle;
+      const playUrl = sessionAttributes.playUrl = SERVER_URL + userPlaySession.audioTracks[currentTrackIndex - 1].contentUrl + "?token=" + ABS_API_KEY;
+
       preparePlaybackTransition(
         sessionAttributes,
         { streamToken: sessionAttributes.streamToken },
         recoveredState?.rawToken || sessionAttributes.activeStreamToken,
         false
-      )
-      retainPlaybackStateLocally(handlerInput, sessionAttributes)
+      );
+      retainPlaybackStateLocally(handlerInput, sessionAttributes);
 
       let timeEnd = timestamps.PlayAudioIntentHandlerEndTime = new Date();
-      let totalIntentTime = timeEnd - timeStart
-      console.log("TIMER: Total Intent Time (PlayAudioIntent): " + totalIntentTime + " ms");
+      console.log("TIMER: Total Intent Time (PlayAudioIntent): " + (timeEnd - timeStart) + " ms");
 
       const metadata = {
         title: chapterTitle,
@@ -557,7 +559,7 @@ const PlayAudioIntentHandler = {
           sources: [
             {
               url: coverUrl,
-              widthPixels: 512, // these seem to be necessary even though docs say it's not
+              widthPixels: 512,
               heightPixels: 512
             }
           ]
@@ -572,6 +574,31 @@ const PlayAudioIntentHandler = {
           ]
         }
       };
+
+      let speakOutput;
+      if (!existingSession) {
+        speakOutput = author ? `Playing ${bookTitle} by ${author}` : `Playing ${bookTitle}`;
+      }
+      console.log(`Playing Audiobookshelf item ${userPlaySession.libraryItemId}, track ${currentTrackIndex}`);
+
+      return handlerInput.responseBuilder
+        .speak(sanitizeForSSML(speakOutput))
+        .addAudioPlayerPlayDirective(
+          playBehavior,
+          playUrl,
+          sessionAttributes.streamToken,
+          offsetInMilliseconds,
+          null,
+          metadata
+        )
+        .withShouldEndSession(true)
+        .getResponse();
+    } catch (error) {
+      console.error("Error during PlayAudioIntentHandler: " + error);
+      throw error;
+    }
+  }
+};
       let speakOutput
       if (existingSession) {
         //speakOutput = 'Resuming...';
@@ -896,63 +923,62 @@ const PlayBookIntentHandler = {
     }
     clearAllMemory(handlerInput)
 
-    // START PLAYING THE BOOK
-    let userPlaySession
-
+// START PLAYING THE BOOK OR PODCAST
     const playBehavior = 'REPLACE_ALL';
-
-    const libraryItemID = libraryItem.id
+    const libraryItemID = libraryItem.id;
 
     let expandedItem = getItemById(libraryItemID, { include: ['progress'], expanded: 1 });
+    const episodeId = resolveTargetEpisodeId(expandedItem);
 
-    // *** this intent presumed to always start a new play session ***
-    // *** OR: if I start using persistent attributes, I can keep track of all
-    // prior play sessions and resume them over time
-    userPlaySession = startUserPlaySession(libraryItemID, handlerInput)
-    delete userPlaySession.libraryItem // this property very large and nothing useful
-    // playSession = userPlaySession
+    let userPlaySession = startUserPlaySession(libraryItemID, handlerInput, episodeId);
+    delete userPlaySession.libraryItem;
 
-    const sessionAttributes = getAlexaSessionAttributes(handlerInput); // cannot set sessionAttriubtes and localAttributes equal
-    localSessionAttributes = JSON.parse(JSON.stringify(sessionAttributes)); // clone sessionAttriubtes (avoid pointer issue)
+    const sessionAttributes = getAlexaSessionAttributes(handlerInput);
+    localSessionAttributes = JSON.parse(JSON.stringify(sessionAttributes));
 
-    let mediaProgress = expandedItem.userMediaProgress
+    const episodeProgress = episodeId && Array.isArray(expandedItem.userMediaProgress)
+      ? expandedItem.userMediaProgress.find(p => p.episodeId === episodeId)
+      : expandedItem.userMediaProgress;
 
-    sessionAttributes.userPlaySession = userPlaySession
-    sessionAttributes.userPlaySessionID = userPlaySession.id // can call API to pull the whole playSession again if needed
+    sessionAttributes.userPlaySession = userPlaySession;
+    sessionAttributes.userPlaySessionID = userPlaySession.id;
 
-    let currentTime = mediaProgress?.currentTime ?? 0.0;
-    if (currentTime > userPlaySession.duration) { // validation
-      currentTime = 0.0 // start at beginning
-      syncPlaybackProgress(userPlaySession, currentTime, { timeListened: 0 })
+    let currentTime = episodeProgress?.currentTime ?? 0.0;
+    if (currentTime > userPlaySession.duration) {
+      currentTime = 0.0;
+      syncPlaybackProgress(userPlaySession, currentTime, { timeListened: 0 });
     }
-    let currentTrack = sessionAttributes.currentTrack = getCurrentTrackByBookTime(currentTime, userPlaySession)
-    let currentTrackIndex = sessionAttributes.amazonToken = getCurrentTrackIndexByBookTime(currentTime, userPlaySession) // should start at 1
-    sessionAttributes.streamToken = createPlaybackInstanceToken(userPlaySession, currentTrackIndex)
+
+    let currentTrack = sessionAttributes.currentTrack = getCurrentTrackByBookTime(currentTime, userPlaySession);
+    let currentTrackIndex = sessionAttributes.amazonToken = getCurrentTrackIndexByBookTime(currentTime, userPlaySession);
+    sessionAttributes.streamToken = createPlaybackInstanceToken(userPlaySession, currentTrackIndex);
     sessionAttributes.currentTrackIndex = currentTrackIndex;
-    let trackStartOffset = currentTrack.startOffset
-    const offsetInMilliseconds = sessionAttributes.offsetInMilliseconds = (currentTime - trackStartOffset) * 1000
 
-    sessionAttributes.nextStreamEnqueued = false
+    let trackStartOffset = currentTrack.startOffset;
+    const offsetInMilliseconds = sessionAttributes.offsetInMilliseconds = (currentTime - trackStartOffset) * 1000;
 
-    const playUrl = sessionAttributes.playUrl = SERVER_URL + userPlaySession.audioTracks[currentTrackIndex - 1].contentUrl + "?token=" + ABS_API_KEY
+    sessionAttributes.nextStreamEnqueued = false;
 
-    const coverUrl = getCoverUrl(userPlaySession.libraryItemId)
+    const playUrl = sessionAttributes.playUrl = SERVER_URL + userPlaySession.audioTracks[currentTrackIndex - 1].contentUrl + "?token=" + ABS_API_KEY;
+    const coverUrl = getCoverUrl(userPlaySession.libraryItemId);
+
     preparePlaybackTransition(
       sessionAttributes,
       { streamToken: sessionAttributes.streamToken },
       null,
       false
-    )
-    retainPlaybackStateLocally(handlerInput, sessionAttributes)
+    );
+    retainPlaybackStateLocally(handlerInput, sessionAttributes);
 
-    let speakOutput = 'Playing ' + userPlaySession.displayTitle + ' by ' + userPlaySession.displayAuthor;
-    console.log(`Playing Audiobookshelf item ${userPlaySession.libraryItemId}, track ${currentTrackIndex}`)
+    const author = userPlaySession.displayAuthor;
+    const speakOutput = author
+      ? `Playing ${userPlaySession.displayTitle} by ${author}`
+      : `Playing ${userPlaySession.displayTitle}`;
+    console.log(`Playing Audiobookshelf item ${userPlaySession.libraryItemId}, track ${currentTrackIndex}`);
 
-    let chapterTitle = getCurrentChapterByBookTime(currentTime, userPlaySession).title
-
-    // chapterTitle = chapterTitle // remove any invalid characters
-
-    const subtitle = userPlaySession.displayTitle
+    const chapterObj = getCurrentChapterByBookTime(currentTime, userPlaySession);
+    const chapterTitle = chapterObj?.title || userPlaySession.displayTitle;
+    const subtitle = userPlaySession.displayTitle;
 
     const metadata = {
       title: chapterTitle,
@@ -961,7 +987,7 @@ const PlayBookIntentHandler = {
         sources: [
           {
             url: coverUrl,
-            widthPixels: 512, // these seem to be necessary even though docs say it's not
+            widthPixels: 512,
             heightPixels: 512
           }
         ]
@@ -978,27 +1004,22 @@ const PlayBookIntentHandler = {
     };
 
     const timeBeforeResponse = timestamps.PlayBookIntentHandlerEndTime = new Date();
-    const timeUntilResponse = timeBeforeResponse - ABSsearchEnd
-    const totalIntentTime = timeBeforeResponse - amazonStuffStart
-    console.log("TIMER: Time after ABS search until skill response: " + timeUntilResponse + " ms")
-    console.log("TIMER: Total intent time (PlayBookIntent): " + totalIntentTime + " ms")
-    timers.totalIntentTime = totalIntentTime
-    timers.preparePlay = timeUntilResponse
+    const timeUntilResponse = timeBeforeResponse - ABSsearchEnd;
+    const totalIntentTime = timeBeforeResponse - amazonStuffStart;
+    console.log("TIMER: Time after ABS search until skill response: " + timeUntilResponse + " ms");
+    console.log("TIMER: Total intent time (PlayBookIntent): " + totalIntentTime + " ms");
+    timers.totalIntentTime = totalIntentTime;
+    timers.preparePlay = timeUntilResponse;
     clearTimers();
 
-    // ways to speed up the Intent:
-    //  1) consider asynchronous functions (like maybe do API search and fuzzy search at same time?)
-    //  2) triage better to avoid running all functions (like only do API search for amazon matched strings)
-    //  3) maybe throw out API call completely (it's not as good as fuzzy search anyways)
-    //    - only problem is not sure how well fuzzy will do with large libraries; might be really slow...
     return handlerInput.responseBuilder
       .speak(sanitizeForSSML(speakOutput))
       .addAudioPlayerPlayDirective(
         playBehavior,
         playUrl,
         sessionAttributes.streamToken,
-        offsetInMilliseconds, // offset in ms
-        null,          // expected previous token (don't include if playBehavior is REPLACE)
+        offsetInMilliseconds,
+        null,
         metadata
       )
       .withShouldEndSession(true)
